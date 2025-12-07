@@ -150,33 +150,78 @@ for(target in err_element_names){
   print(summary(m))
 }
 
-stargazer(logit_results[1:15], type='html', out="element_results.html")
+# stargazer(logit_results[1:15], type='html', out="element_results.html")
 
 
 #############################################
-### 10. Run random-slope glmer
+### 10. Visualization
 #############################################
 
-coef_df <- bind_rows(
-  lapply(names(logit_results), function(name){
-    tidy(logit_results[[name]]) %>% mutate(model = name)
+plot_state_relative <- function(state_name,
+                                     models = logit_results,
+                                     data   = err_model,
+                                     state_var = "state...44") {
+  
+  library(dplyr)
+  library(purrr)
+  library(ggplot2)
+  library(broom)
+  
+  results <- map_df(names(models), function(target) {
+    
+    m <- models[[target]]
+    
+    # -------------------------------
+    # 1. Compute Virginia predictions
+    # -------------------------------
+    data_va <- data
+    data_va[[state_var]] <- state_name  # make all rows "Virginia"
+    
+    pred_va <- mean(predict(m, data_va, type = "response"))
+    
+    # SE for VA (from model)
+    pred_va_link <- predict(m, data_va, type = "link", se.fit = TRUE)
+    se_va <- mean(pred_va_link$se.fit)
+    
+    
+    # ------------------------------------------
+    # 2. Compute Non-Virginia predictions
+    # ------------------------------------------
+    data_ref <- data %>% filter(.data[[state_var]] != state_name)
+    pred_ref <- mean(predict(m, data_ref, type = "response"))
+    
+    
+    # ------------------------------------------
+    # 3. Compute difference + CI
+    # ------------------------------------------
+    diff <- pred_va - pred_ref
+    
+    lcl <- diff - 1.96 * se_va
+    ucl <- diff + 1.96 * se_va
+    
+    tibble(
+      error_type = target,
+      diff = diff,
+      lcl  = lcl,
+      ucl  = ucl
+    )
   })
-)
-
-coef_clean <- coef_df %>%
-  filter(term != "(Intercept)")
-
-ggplot(coef_clean %>% filter(model=="err_shelter_deduction"),
-       aes(x = term, y = estimate, fill = estimate > 0)) +
-  geom_col() +
-  coord_flip() +
-  theme_minimal()
-
-ggplot(coef_clean %>% filter(term=="fsnetinc"),
-       aes(x=model, y=estimate, fill=estimate>0))+
-  geom_col()+
-  coord_flip()
-
-ggsave("plot_fsnetinc.png", width = 10, height = 6, dpi = 300)
-
+  
+  
+  # -------------------------------
+  # Draw a forest plot
+  # -------------------------------
+  ggplot(results, aes(x = diff, y = reorder(error_type, diff))) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+    geom_point() +
+    geom_errorbarh(aes(xmin = lcl, xmax = ucl), height = 0) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title = paste("Relative difference in predicted probability of SNAP errors by state:", state_name),
+      subtitle = paste("Compared to all other states"),
+      x = "Difference in predicted probability (95% CI)",
+      y = "Error Type"
+    ) +
+    theme_minimal()
+}
 
