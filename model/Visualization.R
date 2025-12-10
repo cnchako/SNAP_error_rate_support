@@ -96,7 +96,7 @@ features_bin <- c(
 )
 
 features_cat <- c(
-  "actntype...38",
+  "actntype",
   "cat_elig",
   "year"
 )
@@ -107,16 +107,17 @@ features <- c(features_cont, features_bin, features_cat)
 ### 7. Select needed columns
 #############################################
 
-needed <- c(features, err_element_names, "state...44")
+needed <- c(features, err_element_names, "state")
 
 err_and_no_err.df <- bind_rows(err, no_err)
 names(err_and_no_err.df)
-table(is.na(err_and_no_err.df[,107:121]))
-err_and_no_err.df[,107:121][is.na(err_and_no_err.df)[,107:121]] <- 0
-table(is.na(err_and_no_err.df[,107:121]))
+table(is.na(err_and_no_err.df[,111:125]))
+err_and_no_err.df[,111:125][is.na(err_and_no_err.df)[,111:125]] <- 0
+table(is.na(err_and_no_err.df[,111:125]))
 
 err_model <- err_and_no_err.df %>%
   select(all_of(needed)) %>%
+  mutate(`state` = as.factor(`state`)) %>%  
   drop_na()
 
 cat("Model rows:", nrow(err_model), "\n")
@@ -139,7 +140,7 @@ for(target in err_element_names){
   formula_str <- paste0(
     target, " ~ log(lastcert + 1) + ",
     paste(c(features_cont[-3], features_bin, features_cat), collapse = " + "),
-    " + state...44"
+    " + state"
   )
   formula_obj <- as.formula(formula_str)
   
@@ -150,67 +151,68 @@ for(target in err_element_names){
   print(summary(m))
 }
 
-# stargazer(logit_results[1:15], type='html', out="element_results.html")
+stargazer(logit_results[1:15], type='html', out="element_results.html")
 
 
 #############################################
 ### 10. Visualization
 #############################################
-
 plot_state_relative <- function(state_name,
-                                     models = logit_results,
-                                     data   = err_model,
-                                     state_var = "state...44") {
+                                       models = logit_results,
+                                       data   = err_model,
+                                       state_var = "state") {
   
   library(dplyr)
   library(purrr)
   library(ggplot2)
   library(broom)
   
+  # ----------------------------------------
+  # 1. Build representative household
+  # ----------------------------------------
+  base_row <- data %>% 
+    summarize(across(all_of(features_cont), median, na.rm = TRUE))
+  
+  for (v in features_bin) base_row[[v]] <- 0
+  for (v in features_cat) base_row[[v]] <- levels(data[[v]])[1]
+  
+  # baseline state (model baseline)
+  ref_state <- levels(data[[state_var]])[1]  
+  
   results <- map_df(names(models), function(target) {
     
     m <- models[[target]]
     
-    # -------------------------------
-    # 1. Compute Virginia predictions
-    # -------------------------------
-    data_va <- data
-    data_va[[state_var]] <- state_name  # make all rows "Virginia"
+    # --- reference household ---
+    new_ref <- base_row
+    new_ref[[state_var]] <- factor(ref_state, levels = levels(data[[state_var]]))
     
-    pred_va <- mean(predict(m, data_va, type = "response"))
+    # --- target household (Virginia, etc.) ---
+    new_target <- base_row
+    new_target[[state_var]] <- factor(state_name, levels = levels(data[[state_var]]))
     
-    # SE for VA (from model)
-    pred_va_link <- predict(m, data_va, type = "link", se.fit = TRUE)
-    se_va <- mean(pred_va_link$se.fit)
+    # Predict on link scale w/ SE
+    pred_ref <- predict(m, new_ref, type = "link", se.fit = TRUE)
+    pred_target <- predict(m, new_target, type = "link", se.fit = TRUE)
     
+    # convert to probability
+    p_ref <- plogis(pred_ref$fit)
+    p_target <- plogis(pred_target$fit)
     
-    # ------------------------------------------
-    # 2. Compute Non-Virginia predictions
-    # ------------------------------------------
-    data_ref <- data %>% filter(.data[[state_var]] != state_name)
-    pred_ref <- mean(predict(m, data_ref, type = "response"))
+    diff <- p_target - p_ref
     
-    
-    # ------------------------------------------
-    # 3. Compute difference + CI
-    # ------------------------------------------
-    diff <- pred_va - pred_ref
-    
-    lcl <- diff - 1.96 * se_va
-    ucl <- diff + 1.96 * se_va
+    # CI uses SE of target (conservative)
+    lcl <- plogis(pred_target$fit - 1.96 * pred_target$se.fit) - p_ref
+    ucl <- plogis(pred_target$fit + 1.96 * pred_target$se.fit) - p_ref
     
     tibble(
       error_type = target,
       diff = diff,
-      lcl  = lcl,
-      ucl  = ucl
+      lcl = lcl,
+      ucl = ucl
     )
   })
   
-  
-  # -------------------------------
-  # Draw a forest plot
-  # -------------------------------
   ggplot(results, aes(x = diff, y = reorder(error_type, diff))) +
     geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
     geom_point() +
@@ -218,10 +220,49 @@ plot_state_relative <- function(state_name,
     scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
     labs(
       title = paste("Relative difference in predicted probability of SNAP errors by state:", state_name),
-      subtitle = paste("Compared to all other states"),
+      subtitle = paste("Compared with other states"),
       x = "Difference in predicted probability (95% CI)",
       y = "Error Type"
     ) +
     theme_minimal()
+}
+
+#############################################
+### 11. Visualization (sjPlot)
+#############################################
+
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+
+# Create a folder for plots (optional)
+if (!dir.exists("plots")) dir.create("plots")
+
+# ------------------------------------------
+# 10A. Plot coefficient estimates for each model
+# ------------------------------------------
+
+for(target in names(logit_results)) {
+  
+  m <- logit_results[[target]]
+  
+  # save plot
+  p <- plot_model(
+    m, 
+    type = "est",
+    show.values = TRUE,
+    value.offset = .3,
+    ci_method = "wald" 
+  ) +
+    ggtitle(paste("Coefficient Plot for:", target))
+  
+  # save image
+  ggsave(
+    filename = paste0("plots/coefplot_", target, ".png"),
+    plot = p,
+    width = 8, height = 6
+  )
+  
+  cat("Saved coefficient plot for:", target, "\n")
 }
 
